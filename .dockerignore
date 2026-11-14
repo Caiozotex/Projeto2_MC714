@@ -1,0 +1,8 @@
+.git
+.gitignore
+experiments/results/*
+docs/*.pdf
+*.md
+.venv
+**/__pycache__
+scripts/*.log

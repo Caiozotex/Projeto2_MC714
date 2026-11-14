@@ -1,0 +1,41 @@
+# === Python (virtualenv + cache) ===
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# === Resultados de experimentos (gerados, não versionados) ===
+experiments/results/*.csv
+experiments/results/*.json
+experiments/results/*.png
+experiments/results/plots/
+experiments/results/env_info.txt
+
+# === Build artifacts Go (raramente, mas por segurança) ===
+/node
+/client
+*.test
+*.out
+
+# === LaTeX ===
+docs/relatorio.aux
+docs/relatorio.log
+docs/relatorio.out
+docs/relatorio.pdf
+
+# === Docker ===
+*.log
+
+# === Editores ===
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# === Manter estrutura de pastas vazias ===
+!experiments/results/.gitkeep

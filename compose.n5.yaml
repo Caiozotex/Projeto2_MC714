@@ -1,0 +1,83 @@
+# Override para experimento de 5 nós.
+# Uso: docker compose -f compose.yaml -f compose.n5.yaml up -d --build
+#
+# Herda x-node-base do compose.yaml (via YAML anchor persistente entre arquivos)
+# e adiciona node3/node4. IMPORTANTE: cada serviço declara `image:` (a imagem
+# já foi construída pelo base) em vez de `build:` — override não recompila.
+
+services:
+  node0:
+    environment:
+      PEERS: "0=node0:8000,1=node1:8000,2=node2:8000,3=node3:8000,4=node4:8000"
+  node1:
+    environment:
+      PEERS: "0=node0:8000,1=node1:8000,2=node2:8000,3=node3:8000,4=node4:8000"
+  node2:
+    environment:
+      PEERS: "0=node0:8000,1=node1:8000,2=node2:8000,3=node3:8000,4=node4:8000"
+
+  node3:
+    image: mc714-t2-node:latest
+    container_name: mc714-node3
+    hostname: node3
+    restart: unless-stopped
+    networks: [cluster]
+    healthcheck:
+      test: ["CMD", "/node", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    environment:
+      NODE_ID: "3"
+      LISTEN_ADDR: ":8000"
+      HTTP_ADDR: ":8080"
+      PEERS: "0=node0:8000,1=node1:8000,2=node2:8000,3=node3:8000,4=node4:8000"
+      HEARTBEAT_INTERVAL_MS: "200"
+      HEARTBEAT_TIMEOUT_MS: "800"
+      ELECTION_TIMEOUT_MS: "600"
+      TX_TIMEOUT_MS: "1500"
+      WAL_DIR: "/data/wal"
+      FAULT_SEED: "42"
+      NET_DELAY_MS: "0"
+      NET_JITTER_MS: "0"
+      NET_DROP_RATE: "0.0"
+    volumes:
+      - wal3:/data/wal
+    ports:
+      - "8083:8080"
+
+  node4:
+    image: mc714-t2-node:latest
+    container_name: mc714-node4
+    hostname: node4
+    restart: unless-stopped
+    networks: [cluster]
+    healthcheck:
+      test: ["CMD", "/node", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    environment:
+      NODE_ID: "4"
+      LISTEN_ADDR: ":8000"
+      HTTP_ADDR: ":8080"
+      PEERS: "0=node0:8000,1=node1:8000,2=node2:8000,3=node3:8000,4=node4:8000"
+      HEARTBEAT_INTERVAL_MS: "200"
+      HEARTBEAT_TIMEOUT_MS: "800"
+      ELECTION_TIMEOUT_MS: "600"
+      TX_TIMEOUT_MS: "1500"
+      WAL_DIR: "/data/wal"
+      FAULT_SEED: "42"
+      NET_DELAY_MS: "0"
+      NET_JITTER_MS: "0"
+      NET_DROP_RATE: "0.0"
+    volumes:
+      - wal4:/data/wal
+    ports:
+      - "8084:8080"
+
+volumes:
+  wal3:
+  wal4:
