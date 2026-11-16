@@ -9,9 +9,9 @@ Implementação em **Go** e orquestração via **Docker Compose v2** de um siste
 
 ## Equipe
 
-- **Integrante 1:** `[]` — RA: `[XXXXXX]`
-- **Integrante 2:** `[]` — RA: `[XXXXXX]`
-- 
+- **Integrante 1:** Caio Raphael Teixeira — RA: 212661
+- **Integrante 2:** Vitor Takahashi Miranda — RA: 231740
+
 ---
 
 ## Visão Geral e Arquitetura
