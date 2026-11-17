@@ -14,6 +14,17 @@ Implementação em **Go** e orquestração via **Docker Compose v2** de um siste
 
 ---
 
+## 🎥 Vídeo de Demonstração
+
+**Apresentação:** Caio Raphael Teixeira e Vitor Takahashi Miranda
+
+<video src="./experiments/results/ProjetoMC714.mp4" width="100%" controls autoplay loop muted></video>
+
+O vídeo demonstra:
+1. **Cenário normal** — transações 2PC com `COMMIT` unânime em N=3
+2. **Falha injetada** — `docker compose kill node2` (queda do líder)
+3. **Recuperação** — Bully elege novo líder em <1 s; reintegração do nó antigo como follower
+
 ## Visão Geral e Arquitetura
 
 O sistema implementa um **processador de transações distribuídas sobre dados particionados** com no mínimo **3 nós lógicos independentes** (escalável para 5, 7 ou mais nós via configuração). Todos os algoritmos foram implementados do zero, sem uso de bibliotecas que já implementem eleição, consenso ou detecção de falhas.
