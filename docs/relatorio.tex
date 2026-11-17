@@ -1,0 +1,252 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{placeins}
+\usepackage{url}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+
+\title{Serviço de Transações Distribuídas Tolerante a Falhas:\\Integração de Heartbeat Adaptativo, Eleição do Valentão e Two-Phase Commit}
+
+\author{\IEEEauthorblockN{Caio Raphael Teixeira RA:212661, Vitor Takahashi Miranda RA:231740}
+\IEEEauthorblockA{Universidade Estadual de Campinas (UNICAMP)\\Campinas, SP, Brasil\\
+Repositório: \url{https://github.com/Caiozotex/Projeto2_MC714/tree/main}\\
+Vídeo: \url{https://github.com/Caiozotex/Projeto2_MC714/blob/main/experiments/results/ProjetoMC714.mp4}}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Este trabalho apresenta a implementação em Go e a avaliação experimental de um serviço de transações distribuídas tolerante a falhas benignas. A arquitetura integra três algoritmos clássicos da computação distribuída: um Detector de Falhas baseado em Heartbeat com Timeout Adaptativo, o Algoritmo de Eleição do Valentão (Bully) e o protocolo de Compromisso Atômico em Duas Fases (Two-Phase Commit -- 2PC) com gravação em Write-Ahead Log (WAL). O sistema foi implantado em contêineres Docker independentes orquestrados via Docker Compose v2, eliminando memória compartilhada e forçando comunicação exclusiva via rede IP. Experimentos quantitativos sob variações de escala ($N \in \{3,5,7\}$ nós) e injeção de \textit{jitter} de rede ($0$ a $300$\,ms) demonstraram: (i) zero falsos positivos no detector adaptativo; (ii) crescimento sub-linear do tempo de convergência da eleição do Valentão ($771$\,ms para $N=3$, $839$\,ms para $N=5$ e $880$\,ms para $N=7$); e (iii) estabilidade nas métricas de latência do 2PC ($p50 = 57$\,ms, $p99 = 80$\,ms para $N=3$; $p50 = 57$\,ms, $p99 = 71$\,ms para $N=5$; e $p50 = 87$\,ms, $p99 = 123$\,ms para $N=7$), com $100\%$ de sucesso transacional em todos os cenários. Os resultados comprovam a eficácia da integração modular na preservação das propriedades formais de \textit{Safety} (Atomicidade e Unicidade do Líder) e \textit{Liveness} (Progresso da Eleição e Conclusão das Transações).
+\end{abstract}
+
+\begin{IEEEkeywords}
+sistemas distribuídos, detector de falhas, algoritmo do valentão, two-phase commit, WAL, Docker Compose.
+\end{IEEEkeywords}
+
+\section{Introdução}
+Sistemas distribuídos modernos combinam alta disponibilidade, coordenação consistente de estado e tolerância a falhas parciais. Em ambientes de nuvem e microsserviços, componentes físicos e lógicos falham de forma imprevisível devido a quedas abruptas de processos (\textit{crash-stop}), perda de pacotes ou degradações temporárias de latência.
+
+Para garantir que atualizações de estado em múltiplos nós ocorram com semântica ``tudo-ou-nada'', utiliza-se classicamente o protocolo Two-Phase Commit (2PC). Contudo, o 2PC puro é vulnerável a falhas do coordenador: se este colapsa durante a decisão, os participantes podem ser bloqueados indefinidamente.
+
+Este trabalho projeta e avalia uma solução integrada que resolve essa limitação acoplando três módulos complementares: (i) um Detector de Falhas via Heartbeat Adaptativo; (ii) o Algoritmo de Eleição do Valentão (Bully), acionado pelo detector para reeleger um novo coordenador; e (iii) o 2PC com suporte a WAL e protocolo cooperativo de recuperação. A implementação é totalmente em Go, concorrente via goroutines e canais, e executada em contêineres Docker OCI isolados.
+
+\section{Modelo do Sistema e Arquitetura Integrada}
+
+\subsection{Modelo de Computação e Rede}
+O sistema é composto por $N$ nós lógicos $\mathcal{P}=\{p_0,\dots,p_{N-1}\}$, cada um com identificador inteiro totalmente ordenado. Adota-se um modelo temporal \textbf{parcialmente síncrono}: existem limites superiores para atrasos e velocidade de processamento, mas podem ser temporariamente violados por \textit{jitter}. Os canais são assíncronos, bidirecionais, ponto-a-ponto sobre TCP/IP, com entrega ordenada por conexão e sem corrupção; mensagens podem sofrer atrasos variáveis ou perdas temporárias.
+
+\subsection{Modelo de Falhas}
+Considera-se o modelo de falhas benignas: nós sofrem \textit{crash-stop} e \textit{crash-recovery}, com persistência local via Write-Ahead Log (WAL). A rede pode atrasar ou descartar pacotes, mas não há falhas bizantinas.
+
+\subsection{Hipóteses de Relógio, Persistência e Reinicialização}
+Não se exige sincronização de relógios físicos entre os nós. Todas as medições internas (intervalo de heartbeat, timeouts de eleição, \emph{deadlines} de RPC) usam exclusivamente o relógio \emph{monotônico} local do sistema operacional, admitindo-se apenas deriva (\emph{drift}) limitada do oscilador. Identificadores de transação (\texttt{tx\_id}) são UUIDs gerados pelo cliente, sem dependência temporal. A persistência é local a cada nó via Write-Ahead Log append-only com \texttt{fsync} antes de qualquer resposta crítica: o participante grava \texttt{READY} antes de enviar \texttt{VOTE\_COMMIT}; o coordenador grava a decisão (\texttt{COMMIT}/\texttt{ABORT}) antes de difundi-la. Após \emph{crash-recovery}, cada nó executa \texttt{ReplayWAL} para reidratar o estado transacional; transações em \texttt{INIT} ou \texttt{WAIT} sem decisão são abortadas com segurança; transações em \texttt{READY} disparam o protocolo cooperativo de recuperação. O estado de eleição (\texttt{term}, \texttt{leader}) é volátil por decisão de projeto: um nó reiniciado sem líder conhecido agenda uma eleição de \emph{boot} com \emph{stagger} proporcional ao seu \texttt{NODE\_ID}, e adota o líder atual assim que um \texttt{hb.pong} o informa (\texttt{AdoptLeader}), evitando regressão de termo.
+
+\subsection{Arquitetura}
+Cada nó organiza-se em três camadas desacopladas (Fig.~\ref{fig:arch}):
+\begin{enumerate}
+  \item \textbf{Detecção de Falhas (Heartbeat Adaptativo):} envia pulsos periódicos \texttt{is-alive} aos pares e marca um nó como suspeito quando o tempo desde o último pulso excede um \textit{timeout} adaptativo $\tau_{\text{adapted}}$.
+  \item \textbf{Coordenação e Eleição (Bully):} ao receber suspeita do coordenador, inicia eleição enviando \texttt{ELECTION} a nós com ID maior; o maior ativo vence e difunde \texttt{COORDINATOR}.
+  \item \textbf{Camada Transacional (2PC + WAL):} o líder eleito coordena transações nas Fases~1 (\texttt{VOTE\_REQUEST}/\texttt{VOTE\_COMMIT}) e~2 (\texttt{GLOBAL\_COMMIT}/\texttt{GLOBAL\_ABORT}), com registro em WAL antes de respostas.
+\end{enumerate}
+
+\begin{figure}[!t]
+\centering
+\footnotesize
+\fbox{\parbox{0.92\columnwidth}{\centering
+\textbf{Camada Transacional} (2PC + WAL) \\
+\rule{0.85\columnwidth}{0.2pt} \\
+$\uparrow$ notificação de mudança de líder \\
+\textbf{Eleição de Líder} (Bully) \\
+\rule{0.85\columnwidth}{0.2pt} \\
+$\uparrow$ notificação de suspeita \\
+\textbf{Detecção de Falhas} (Heartbeat Adaptativo)
+}}
+\caption{Arquitetura em camadas por nó.}
+\label{fig:arch}
+\end{figure}
+
+\section{Algoritmos e Garantias Formais}
+
+\subsection{Detector de Falhas Adaptativo}
+Para reduzir falsos positivos induzidos por \textit{jitter}, o detector ajusta dinamicamente o \textit{timeout}. Ao receber um pulso tardio de um nó previamente suspeito, o detector o remove do conjunto $\mathcal{S}$ e incrementa seu \textit{timeout}:
+\begin{equation}
+\tau_i \leftarrow \min\!\bigl(\tau_i + \alpha\cdot\Delta,\ \tau_{\max}\bigr),
+\end{equation}
+onde $\Delta$ é o incremento base e $\tau_{\max}=8\Delta$ evita explosão. \textbf{Safety:} minimiza suspeitas incorretas sob rede degradada. \textbf{Liveness:} qualquer nó que falhe permanentemente será eventualmente detectado por todos os corretos.
+
+\subsection{Eleição do Valentão (Bully)}
+O algoritmo explora a ordem total dos IDs. Quando $p_k$ detecta falha do líder, envia \texttt{ELECTION} a todos os $p_m$ com $m>k$. Se nenhum responder \texttt{OK} em $T_{\text{election}}$, $p_k$ assume e difunde \texttt{COORDINATOR}; se algum responder \texttt{OK}, cede e aguarda o anúncio. \textbf{Safety (Unicidade):} em qualquer instante de estabilidade, existe no máximo um líder por termo. \textbf{Liveness:} após falhas e reconvergência, a eleição termina em tempo finito escolhendo o maior ID correto.
+
+\subsection{Compromisso Atômico (2PC + WAL)}
+\begin{itemize}
+  \item \textbf{Fase 1:} o coordenador gera \texttt{tx\_id} único, envia \texttt{VOTE\_REQUEST}, e cada participante valida pré-condições locais, persiste \texttt{VOTE\_COMMIT} em WAL e responde.
+  \item \textbf{Fase 2:} se 100\% dos votos forem \texttt{VOTE\_COMMIT}, o coordenador persiste a decisão em WAL e envia \texttt{GLOBAL\_COMMIT}; caso contrário (ou por \textit{timeout}), envia \texttt{GLOBAL\_ABORT}.
+  \item \textbf{Recuperação cooperativa:} participantes em \texttt{READY} após \textit{timeout} consultam os pares sobre o estado da transação. O novo líder eleito pelo Bully lê o WAL e conclui transações pendentes.
+\end{itemize}
+
+\section{Metodologia Experimental}
+
+\subsection{Ambiente e Carga}
+Os ensaios foram executados em um host Linux Debian 13 (Trixie) com processador Intel Core i5/i7 (12 núcleos lógicos visíveis), 16\,GB de RAM, kernel 7.0.0-38-generic, Docker Engine 29.9.3 e Docker Compose v5.7.1, com código compilado por Go 1.27.1 (linux/amd64, CGO desabilitado). Cada configuração foi executada com \emph{warm-up} de 20 transações ($\approx 1$--$2$\,s) seguido de $200$ transações medidas por escala $N\in\{3,5,7\}$, com sementes de falha fixas (\texttt{FAULT\_SEED=42}). As execuções foram automatizadas por \texttt{scripts/run\_experiments.sh}; a bateria completa ($N\in\{3,5,7\}$ para 2PC e Bully, mais 4 níveis de \emph{jitter} para Heartbeat) levou $\approx 15$ minutos no modo \texttt{REPS=1}. Todos os CSVs brutos e metadados do ambiente (\texttt{env\_info.txt}) estão em \texttt{experiments/results/} no repositório.
+
+\subsection{Detector de Falhas sob Jitter}
+A Tabela~\ref{tab:hb} apresenta o número de falsos positivos (eventos \texttt{peer suspeito} em logs após estabilização) sob \textit{jitter} injetado.
+
+\begin{table}[!t]
+\caption{Falsos positivos do detector por \textit{jitter} injetado.}
+\label{tab:hb}
+\centering
+\scriptsize
+\begin{tabular}{ccc}
+\toprule
+Jitter (ms) & Falsos positivos & Taxa \\
+\midrule
+0   & 0 & 0\% \\
+50  & 0 & 0\% \\
+150 & 0 & 0\% \\
+300 & 0 & 0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+O \textit{timeout} adaptativo (base $800$\,ms, até $8\times$) tolerou variação de até $300$\,ms sem nenhuma suspeita incorreta, mantendo o consumo de banda de controle marginal e evitando eleições desnecessárias.
+
+\subsection{Convergência do Bully}
+A Tabela~\ref{tab:bully} sintetiza o tempo entre \texttt{docker kill} do líder e o reconhecimento do novo líder pelos sobreviventes.
+
+\begin{table}[!t]
+\caption{Convergência do Bully pós-queda do líder.}
+\label{tab:bully}
+\centering
+\scriptsize
+\begin{tabular}{cccc}
+\toprule
+$N$ & Líder caído & Novo líder & Convergência (ms) \\
+\midrule
+3 & $p_2$ & $p_1$ & 771 \\
+5 & $p_4$ & $p_3$ & 839 \\
+7 & $p_6$ & $p_5$ & 880 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+O tempo de convergência cresce de forma moderada e sub-linear ($771$\,ms em $N=3$ para $880$\,ms em $N=7$, apenas $+14{,}1\%$ para o dobro de nós): ao cair o líder, o segundo maior ID assume e se autodeclara vencedor assim que expira o \textit{timeout} das mensagens de verificação.
+
+\subsection{Latência do 2PC}
+A Tabela~\ref{tab:2pc} sumariza o perfil estatístico de latência para $200$ transações por escala.
+
+\begin{table}[!t]
+\caption{Latência do 2PC por escala (200 transações).}
+\label{tab:2pc}
+\centering
+\scriptsize
+\begin{tabular}{crrrrr}
+\toprule
+$N$ & Média (ms) & $p50$ (ms) & $p95$ (ms) & $p99$ (ms) & Sucesso \\
+\midrule
+3 & 57.02 & 57.00 & 73.00 & 80.09 & 100\% \\
+5 & 56.78 & 57.00 & 67.00 & 71.04 & 100\% \\
+7 & 87.55 & 87.00 & 102.00 & 123.03 & 100\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Observação 1 (não-linearidade).} Cada transação envolve apenas duas contas particionadas por \texttt{hash(account) mod N}; logo o número de participantes por transação é limitado a $2$, independentemente de $N$. As chamadas de Fase~1 e Fase~2 são disparadas em paralelo via goroutines, de modo que a latência é dominada pelo participante mais lento, não pela soma.
+
+\textbf{Observação 2 ($N=5$ com cauda menor).} A mediana permanece em $57$\,ms de $N=3$ para $N=5$, mas o $p99$ cai de $80$\,ms para $71$\,ms. Isso se deve ao escalonamento mais uniforme da carga entre os contêineres no \textit{Docker bridge} quando o \textit{sharding} de \texttt{alice}/\texttt{bob} cai em nós distintos.
+
+\textbf{Observação 3 (salto em $N=7$).} O acréscimo de $+52{,}6\%$ no $p50$ e $+73{,}6\%$ no $p99$ justifica-se pelo \textit{overhead} de E/S de rede na coleta de $6$ \texttt{VOTE\_COMMIT} em paralelo e pelo custo de concorrência na gravação em disco via WAL em $7$ contêineres. Não é um efeito algorítmico do 2PC.
+
+\textbf{Integridade.} Em todos os $600$ ensaios, $100\%$ das transações concluíram com \texttt{COMMIT}, sem inconsistências.
+
+\begin{figure}[!t]
+\centering
+\IfFileExists{twopc_latency.png}%
+  {\includegraphics[width=\columnwidth]{twopc_latency.png}}%
+  {\fbox{\parbox[c][1.05in][c]{.94\columnwidth}{\centering Inserir \texttt{twopc\_latency.png}}}}
+\caption{Latência $p50$/$p95$/$p99$ do 2PC por escala.}
+\label{fig:2pc}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\IfFileExists{bully_converge.png}%
+  {\includegraphics[width=\columnwidth]{bully_converge.png}}%
+  {\fbox{\parbox[c][1.05in][c]{.94\columnwidth}{\centering Inserir \texttt{bully\_converge.png}}}}
+\caption{Tempo de convergência do Bully pós-kill.}
+\label{fig:bully}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\IfFileExists{heartbeat_fp.png}%
+  {\includegraphics[width=\columnwidth]{heartbeat_fp.png}}%
+  {\fbox{\parbox[c][1.05in][c]{.94\columnwidth}{\centering Inserir \texttt{heartbeat\_fp.png}}}}
+\caption{Falsos positivos do heartbeat vs.\ jitter.}
+\label{fig:hb}
+\end{figure}
+
+\FloatBarrier
+
+\section{Discussão e Limitações}
+
+\subsection{Trade-offs da Arquitetura}
+A integração resolve deficiências isoladas de cada componente. O acoplamento do Heartbeat ao Bully reduz o bloqueio clássico do 2PC: a queda do coordenador não paralisa o sistema, pois uma nova eleição é concluída em menos de $900$\,ms e o novo líder consulte o WAL e os estados dos participantes para concluir transações pendentes. O \textit{timeout} adaptativo previne tempestades de eleições por oscilações transitórias de rede, mantendo o consumo de banda de controle marginal.
+
+\subsection{Limitações}
+\begin{enumerate}
+  \item \textbf{Bloqueio remanescente do 2PC.} Se o coordenador cair após enviar \texttt{GLOBAL\_COMMIT} a apenas um participante e todos os demais estiverem em \texttt{READY} sem comunicação com este, o grupo permanece bloqueado até a recuperação do coordenador ou a cura da partição. É uma limitação fundamental do 2PC, exigindo 3PC ou consenso (Paxos/Raft) para ser plenamente superada.
+  \item \textbf{Ambiente local.} Os contêineres Docker garantem isolamento de espaço de usuário e comunicação via sockets TCP, mas compartilham kernel e recursos de CPU/disco do host, o que atenua gargalos reais de rede de longa distância.
+  \item \textbf{Escala limitada.} Os experimentos exploraram até $N=7$. A extensão para dezenas de nós exigiria análise de saturação de conexões e de contenção no \textit{Docker bridge}, além de possivelmente adotar protocolos de membership mais escaláveis que o broadcast uniforme do Bully.
+  \item \textbf{Amostra experimental limitada.} Os resultados reportados foram obtidos com uma única execução (\texttt{REPS=1}) por configuração, totalizando $200$ transações por escala para o 2PC. Embora as estatísticas de tendência ($p50$, $p95$, $p99$, média) sejam estáveis, a variabilidade entre execuções independentes não foi caracterizada por intervalo de confiança nesta versão. O script \texttt{run\_experiments.sh} suporta a variável \texttt{REPS=N} para múltiplas repetições com sementes independentes; a bateria completa com \texttt{REPS=5} é reproduzível a partir do repositório.
+\end{enumerate}
+
+\section{Conclusão}
+Este trabalho apresentou a implementação e avaliação de um serviço transacional distribuído em Go, integrando Heartbeat Adaptativo, Eleição do Valentão e Two-Phase Commit com WAL. Os experimentos comprovaram que: (i) o detector adaptativo eliminou falsos positivos em \textit{jitter} de até $300$\,ms; (ii) o tempo de convergência do Bully manteve-se sub-linear, estabilizando-se em $880$\,ms para $N=7$; e (iii) o 2PC preservou $100\%$ de sucesso transacional, com medianas $p50$ de $57$\,ms ($N\in\{3,5\}$) e $87$\,ms ($N=7$), demonstrando previsibilidade nos percentis de cauda. As propriedades de \textit{Safety} (Atomicidade e Unicidade do Líder) e \textit{Liveness} (Progresso e Conclusão) foram observadas empiricamente.
+
+Como trabalhos futuros, propõe-se: substituir o 2PC por uma máquina de estados replicada baseada em Raft; avaliar partições de rede reais com Toxiproxy; e executar os ensaios em infraestrutura multirregião de nuvem pública para capturar latências WAN representativas.
+
+\section*{Código Reutilizado}
+
+Todos os componentes deste trabalho foram implementados de forma original pela equipe, incluindo: (i) transporte TCP com \emph{framing} length-prefix + JSON (\texttt{internal/transport}); (ii) detector de falhas via heartbeat com \emph{timeout} adaptativo (\texttt{internal/heartbeat}); (iii) algoritmo do Valentão (\texttt{internal/bully}); (iv) protocolo 2PC com WAL e protocolo cooperativo de recuperação (\texttt{internal/twopc}, \texttt{internal/storage}); e (v) API HTTP externa (\texttt{internal/api}). As bibliotecas de comunicação, serialização, persistência e concorrência utilizadas limitam-se à \emph{standard library} da linguagem Go, em conformidade com a Seção~2 do enunciado, que permite bibliotecas de comunicação mas proíbe componentes que implementem diretamente os algoritmos avaliados. Para geração de gráficos utilizou-se \texttt{matplotlib} e \texttt{pandas} (código de terceiros, não-adaptado, apenas consumido via API). A orquestração usa Docker Engine 29.9.3 e Docker Compose v5.7.1. \textbf{Nenhum código-fonte externo foi adaptado} e nenhuma biblioteca que implemente eleição, detecção de falhas ou consenso foi empregada.
+
+\begin{thebibliography}{00}
+
+\bibitem{coulouris}
+G.~Coulouris, J.~Dollimore, T.~Kindberg, and G.~Blair,
+\textit{Distributed Systems: Concepts and Design}, 5th ed.
+Addison-Wesley, 2011.
+
+\bibitem{steen}
+A.~S. Tanenbaum and M.~van Steen,
+\textit{Distributed Systems}, 4th ed.
+distributed-systems.net, 2023.
+
+\bibitem{kshemkalyani}
+A.~D. Kshemkalyani and M.~Singhal,
+\textit{Distributed Computing: Principles, Algorithms, and Systems}.
+Cambridge University Press, 2008.
+
+\bibitem{garcia}
+H.~Garcia-Molina,
+``Elections in a distributed computing system,''
+\textit{IEEE Transactions on Computers}, vol.~C-31, no.~1, pp.~48--59, 1982.
+
+\bibitem{gray}
+J.~Gray,
+``Notes on data base operating systems,''
+in \textit{Operating Systems}, Springer, 1978, pp.~393--481.
+
+\bibitem{chen}
+W.~Chen, S.~Toueg, and M.~K. Aguilera,
+``On the quality of service of failure detectors,''
+\textit{IEEE Transactions on Computers}, vol.~51, no.~5, pp.~561--580, 2002.
+
+\end{thebibliography}
+
+\end{document}
